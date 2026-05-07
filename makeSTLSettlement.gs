@@ -11,9 +11,9 @@ const FOLDER_URLS = [
 const CAD_TYPES = [
   "crown_cad",
   "inlay_cad",
-  "model_cad",
   "waxup_cad",
-  "bridge_cad"
+  "bridge_cad",
+  "abutment_cad"
 ];
 
 const ANTERIOR = new Set([
@@ -72,6 +72,10 @@ function makeSTLSettlement() {
 }
 
 function scanFolder(folder, folderLabel, path, fileRows, toothRows, summary, toothSummary) {
+  if (isRedoFolder(folder.getName())) {
+    return;
+  }
+
   const files = folder.getFiles();
 
   while (files.hasNext()) {
@@ -158,6 +162,10 @@ function scanFolder(folder, folderLabel, path, fileRows, toothRows, summary, too
   }
 }
 
+
+function isRedoFolder(name) {
+  return name.toLowerCase() === "redo";
+}
 function analyzeFileName(fileName) {
   const lower = fileName.toLowerCase();
 
@@ -261,11 +269,7 @@ function getSettlementCategory(cadType, teeth) {
     return "인레이";
   }
 
-  if (cadType === "model_cad") {
-    return "모델";
-  }
-
-  if (cadType === "crown_cad" || cadType === "waxup_cad") {
+  if (cadType === "crown_cad" || cadType === "waxup_cad" || cadType === "abutment_cad") {
     if (teeth.length === 0) {
       return "치식미확인";
     }
