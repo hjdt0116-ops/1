@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>치과기공 STL 정산 시스템</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.34.0/dist/tabler-icons.min.css"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+    --font-mono: "SF Mono", "Fira Code", "Consolas", monospace;
+    --border-radius-sm: 4px;
+    --border-radius-md: 6px;
+    --border-radius-lg: 10px;
+
+    /* Light theme */
+    --color-background-primary:   #ffffff;
+    --color-background-secondary: #f8f9fa;
+    --color-background-tertiary:  #f1f3f5;
+    --color-background-info:      #eff6ff;
+    --color-background-success:   #f0fdf4;
+
+    --color-text-primary:   #111827;
+    --color-text-secondary: #6b7280;
+    --color-text-success:   #15803d;
+    --color-text-warning:   #b45309;
+    --color-text-danger:    #dc2626;
+    --color-text-info:      #1d4ed8;
+
+    --color-border-tertiary: #e5e7eb;
+    --color-border-secondary:#d1d5db;
+    --color-border-info:     #93c5fd;
+    --color-border-success:  #86efac;
+    --color-border-danger:   #fca5a5;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --color-background-primary:   #1c1c1e;
+      --color-background-secondary: #2c2c2e;
+      --color-background-tertiary:  #111113;
+      --color-background-info:      #172035;
+      --color-background-success:   #142015;
+
+      --color-text-primary:   #f2f2f7;
+      --color-text-secondary: #8e8e93;
+      --color-text-success:   #34c759;
+      --color-text-warning:   #ff9f0a;
+      --color-text-danger:    #ff453a;
+      --color-text-info:      #64a0f4;
+
+      --color-border-tertiary: #3a3a3c;
+      --color-border-secondary:#48484a;
+      --color-border-info:     #2c4a7c;
+      --color-border-success:  #1c4d2b;
+      --color-border-danger:   #5c1c1c;
+    }
+  }
+
+  body {
+    background: var(--color-background-tertiary);
+    font-family: var(--font-sans);
+    color: var(--color-text-primary);
+    min-height: 100vh;
+  }
+
+  input, button, select {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    border: 0.5px solid var(--color-border-secondary);
+    border-radius: var(--border-radius-md);
+    padding: 7px 10px;
+    background: var(--color-background-primary);
+    color: var(--color-text-primary);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus { border-color: var(--color-border-info); }
+
+  button {
+    cursor: pointer;
+    background: var(--color-background-secondary);
+    color: var(--color-text-primary);
+    border: 0.5px solid var(--color-border-tertiary);
+  }
+  button:hover { opacity: 0.85; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 8px 10px; }
+  th {
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--color-text-secondary);
+    font-size: 11px;
+    background: var(--color-background-secondary);
+  }
+
+  tr:hover td { background: var(--color-background-secondary); }
+  tr.expanded td { background: var(--color-background-info) !important; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useCallback } = React;
+
+// ── Constants ────────────────────────────────────────────────────
+const ANTERIOR = new Set([11,12,13,21,22,23,31,32,33,41,42,43]);
+const LABELS   = { anterior:"전치부", posterior:"구치부", bridge:"브릿지", abutment:"Abutment", screw:"Screw" };
+const TAG_COLOR = { anterior:"#1d4ed8", posterior:"#15803d", bridge:"#7c3aed", abutment:"#c2410c", screw:"#b91c1c" };
+const TAG_BG    = { anterior:"#dbeafe", posterior:"#dcfce7", bridge:"#ede9fe", abutment:"#ffedd5", screw:"#fee2e2" };
+
+// ── File System helpers ──────────────────────────────────────────
+async function readAllEntries(reader) {
+  return new Promise((res, rej) => {
+    const all = [];
+    const next = () => reader.readEntries(
+      batch => { if (!batch.length) res(all); else { all.push(...batch); next(); } },
+      rej
+    );
+    next();
+  });
+}
+
+async function getFileDate(entry) {
+  return new Promise(resolve => {
+    entry.file(
+      f  => resolve(new Date(f.lastModified).toISOString().substring(0, 10)),
+      () => resolve("")
+    );
+  });
+}
+
+async function readFileText(entry) {
+  return new Promise((res, rej) => {
+    entry.file(f => {
+      const r = new FileReader();
+      r.onload = e => res(e.target.result);
+      r.onerror = rej;
+      r.readAsText(f);
+    }, rej);
+  });
+}
+
+function parseModelInfo(xml) {
+  const teeth = [];
+  const toothBlocks = xml.match(/<Tooth>[\s\S]*?<\/Tooth>/g) || [];
+  for (const block of toothBlocks) {
+    const numMatch  = block.match(/<Number>(\d+)<\/Number>/);
+    const typeMatch = block.match(/<ReconstructionType>(\w+)<\/ReconstructionType>/);
+    if (numMatch && typeMatch)
+      teeth.push({ number: parseInt(numMatch[1]), reconType: typeMatch[1] });
+  }
+  return teeth;
+}
+
+async function scanCaseFolder(dirEntry) {
+  const entries = await readAllEntries(dirEntry.createReader());
+  const files = [];
+  let date = "";
+  const modelInfoMap = {};
+
+  for (const e of entries) {
+    if (!e.isDirectory) {
+      const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+      if (ext === "modelinfo") {
+        try {
+          const xml  = await readFileText(e);
+          const teeth = parseModelInfo(xml);
+          const stlName = e.name.replace(/\.modelInfo$/i, ".stl");
+          modelInfoMap[stlName] = teeth;
+        } catch(_) {}
+      }
+    }
+  }
+
+  for (const e of entries) {
+    const ext = e.name.includes(".") ? e.name.split(".").pop().toLowerCase() : "";
+    if (e.isDirectory) {
+      files.push({ title: e.name, ext: "", isFolder: true });
+    } else {
+      const modelInfoTeeth = modelInfoMap[e.name] || null;
+      files.push({ title: e.name, ext, isFolder: false, modelInfoTeeth });
+      if (!date && (ext === "stl" || ext === "constructioninfo" || ext === "dentalproject"))
+        date = await getFileDate(e);
+    }
+  }
+  return { folderName: dirEntry.name, folderId: dirEntry.name, createdTime: date, files };
+}
+
+// ── Parsing helpers ──────────────────────────────────────────────
+function parseFolderName(name) {
+  let s = name.startsWith("_") ? name.slice(1) : name;
+  const parts = s.split("_");
+  let i = 0;
+  while (i < parts.length && /^[A-Za-z]+$/.test(parts[i])) i++;
+  const patientName = parts.slice(0, i).join(" ");
+  const shadeRe = /^(BL\d|[A-D]\d(\.\d)?|[012]M\d|Fullcast|fullcast)$/i;
+  let shade = "";
+  const specialTags = [];
+  parts.slice(i).forEach(p => {
+    if (!shade && shadeRe.test(p)) shade = p.toUpperCase();
+    else if (p && !/^\d+$/.test(p) && !/-\d+$/.test(p)) specialTags.push(p);
+  });
+  const om = name.match(/([A-Za-z\d#_]+-\d{2,3})$/);
+  const orderNumber = om ? om[1].replace(/^_/, "") : parts[parts.length - 1];
+  return { patientName, shade, orderNumber, specialTags };
+}
+
+function parseTeeth(files) {
+  const counts  = { anterior:0, posterior:0, bridge:0, abutment:0, screw:0 };
+  const toothNums = [];
+
+  files
+    .filter(f =>
+      !f.isFolder && f.ext === "stl" &&
+      (/_cad\.stl$/i.test(f.title) || /waxup_cad\.stl$/i.test(f.title) || /digitalwaxupmodel\.stl$/i.test(f.title))
+    )
+    .forEach(f => {
+      const t = f.title;
+      const cadType = t.match(/inlay_cad/i)        ? "inlay"
+        : t.match(/abutment_cad/i)                 ? "abutment"
+        : t.match(/screw\w*_cad/i)                 ? "screw"
+        : t.match(/bridge[\w_]*cad/i)              ? "bridge_explicit"
+        : t.match(/waxup_cad/i)                    ? "waxup_cad"
+        : t.match(/crown_cad/i)                    ? "crown"
+        : t.match(/digitalwaxupmodel/i)            ? "waxup"
+        : null;
+      if (!cadType) return;
+
+      const m = t.match(/-(\d{2}(?:-\d{2})*)-(?:inlay|crown|abutment|screw\w*?|bridge[\w_]*?|waxup)_cad\.stl$/i)
+             || t.match(/-(\d{2}(?:-\d{2})*)-digitalwaxupmodel\.stl$/i);
+      if (!m) return;
+
+      const nums = m[1].split("-").map(Number);
+
+      if (cadType === "abutment") {
+        counts.abutment += nums.length;
+        nums.forEach(n => toothNums.push({ n, type:"abutment" }));
+      } else if (cadType === "screw") {
+        counts.screw += nums.length;
+        nums.forEach(n => toothNums.push({ n, type:"screw" }));
+      } else if (
+        cadType === "bridge_explicit" ||
+        (cadType === "waxup_cad" && nums.length > 1) ||
+        (cadType === "crown"     && nums.length > 1)
+      ) {
+        counts.bridge += nums.length;
+        nums.forEach(n => toothNums.push({ n, type:"bridge" }));
+      } else if (cadType === "waxup") {
+        if (f.modelInfoTeeth && f.modelInfoTeeth.length > 0) {
+          f.modelInfoTeeth
+            .filter(t => t.reconType === "AnatomicPontic")
+            .forEach(({ number: n }) => {
+              const type = ANTERIOR.has(n) ? "anterior" : "posterior";
+              counts[type]++;
+              toothNums.push({ n, type });
+            });
+        } else {
+          nums.forEach(n => {
+            const type = ANTERIOR.has(n) ? "anterior" : "posterior";
+            counts[type]++;
+            toothNums.push({ n, type });
+          });
+        }
+      } else {
+        const type = ANTERIOR.has(nums[0]) ? "anterior" : "posterior";
+        counts[type]++;
+        toothNums.push({ n: nums[0], type });
+      }
+    });
+
+  return { counts, toothNums };
+}
+
+function buildCases(rawList) {
+  return rawList
+    .filter(c => c.folderName && c.folderName !== "Redo")
+    .map(c => {
+      const meta = parseFolderName(c.folderName);
+      const { counts, toothNums } = parseTeeth(c.files || []);
+      const total  = Object.values(counts).reduce((a, b) => a + b, 0);
+      const hasRef = (c.files || []).some(f => f.isFolder);
+      return {
+        ...meta, ...counts, total, hasRef, toothNums,
+        date:       c.createdTime ? c.createdTime.substring(0, 10) : "",
+        folderId:   c.folderId || c.folderName,
+        folderName: c.folderName,
+      };
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+// ── Sub-components ───────────────────────────────────────────────
+function Chip({ label, val, small }) {
+  if (val > 0) return (
+    <span style={{
+      background: TAG_BG[label], color: TAG_COLOR[label],
+      padding: small ? "1px 5px" : "2px 7px",
+      borderRadius: 4, fontSize: small ? 11 : 12,
+      fontWeight: 700, display: "inline-block"
+    }}>{val}</span>
+  );
+  return <span style={{ color:"#ccc", fontSize:12 }}>—</span>;
+}
+
+// ── Main component ───────────────────────────────────────────────
+function App() {
+  const [cases,       setCases]       = useState([]);
+  const [loading,     setLoading]     = useState(false);
+  const [progress,    setProgress]    = useState("");
+  const [dragOver,    setDragOver]    = useState(false);
+  const [dateFrom,    setDateFrom]    = useState("");
+  const [dateTo,      setDateTo]      = useState("");
+  const [search,      setSearch]      = useState("");
+  const [showPricing, setShowPricing] = useState(false);
+  const [prices,      setPrices]      = useState({ anterior:0, posterior:0, bridge:0, abutment:0, screw:0 });
+  const [expandedRow, setExpandedRow] = useState(null);
+  const [folderName,  setFolderName]  = useState("");
+
+  const handleDrop = useCallback(async e => {
+    e.preventDefault();
+    setDragOver(false);
+    if (!e.dataTransfer.items) return;
+
+    setLoading(true);
+    setProgress("폴더 구조 읽는 중...");
+    const rawCases = [];
+
+    try {
+      for (const item of [...e.dataTransfer.items]) {
+        const entry = item.webkitGetAsEntry?.();
+        if (!entry) continue;
+        if (entry.isDirectory) {
+          const children  = await readAllEntries(entry.createReader());
+          const caseDirs  = children.filter(c => c.isDirectory && c.name !== "Redo");
+          if (caseDirs.length > 0) {
+            setFolderName(entry.name);
+            for (let i = 0; i < caseDirs.length; i++) {
+              setProgress(`스캔 중... ${i + 1} / ${caseDirs.length}`);
+              rawCases.push(await scanCaseFolder(caseDirs[i]));
+            }
+          } else {
+            setFolderName("");
+            rawCases.push(await scanCaseFolder(entry));
+          }
+        }
+      }
+
+      const parsed = buildCases(rawCases);
+      setCases(prev => {
+        const existing = new Map(prev.map(c => [c.folderId, c]));
+        parsed.forEach(c => existing.set(c.folderId, c));
+        return [...existing.values()].sort((a, b) => b.date.localeCompare(a.date));
+      });
+      setProgress(`완료 — ${parsed.length}개 케이스`);
+    } catch (err) {
+      setProgress("오류: " + err.message);
+    }
+    setLoading(false);
+  }, []);
+
+  const filtered = useMemo(() => cases.filter(c => {
+    if (dateFrom && c.date < dateFrom) return false;
+    if (dateTo   && c.date > dateTo)   return false;
+    if (search) {
+      const q = search.toLowerCase();
+      if (!c.patientName.toLowerCase().includes(q) && !c.orderNumber.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  }), [cases, dateFrom, dateTo, search]);
+
+  const totals = useMemo(() => filtered.reduce((acc, c) => ({
+    anterior:  acc.anterior  + c.anterior,
+    posterior: acc.posterior + c.posterior,
+    bridge:    acc.bridge    + c.bridge,
+    abutment:  acc.abutment  + c.abutment,
+    screw:     acc.screw     + c.screw,
+    total:     acc.total     + c.total,
+  }), { anterior:0, posterior:0, bridge:0, abutment:0, screw:0, total:0 }), [filtered]);
+
+  const totalAmt = Object.keys(prices).reduce(
+    (s, k) => s + (Number(prices[k]) || 0) * (totals[k] || 0), 0
+  );
+
+  const exportCSV = () => {
+    const h = ["날짜","환자명","주문번호","쉐이드","전치부","구치부","브릿지","Abutment","Screw","합계","특이사항"];
+    const rows = filtered.map(c => [
+      c.date, c.patientName, c.orderNumber, c.shade,
+      c.anterior, c.posterior, c.bridge, c.abutment, c.screw,
+      c.total, c.specialTags.join("/")
+    ]);
+    const csv = [h, ...rows].map(r => r.map(v => `"${v}"`).join(",")).join("\n");
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,﻿" + encodeURIComponent(csv);
+    a.download = "dental_정산.csv";
+    a.click();
+  };
+
+  return (
+    <div style={{ background:"var(--color-background-tertiary)", minHeight:"100vh", fontFamily:"var(--font-sans)" }}>
+
+      {/* ── Header ── */}
+      <div style={{ background:"var(--color-background-primary)", borderBottom:"0.5px solid var(--color-border-tertiary)", padding:"14px 20px" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10 }}>
+          <div>
+            <div style={{ fontSize:17, fontWeight:500, color:"var(--color-text-primary)" }}>치과기공 STL 정산 시스템</div>
+            {folderName
+              ? <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginTop:2 }}>
+                  <i className="ti ti-folder" style={{ marginRight:4 }}></i>{folderName} — {cases.length}개 케이스
+                </div>
+              : <div style={{ fontSize:12, color:"var(--color-text-secondary)", marginTop:2 }}>폴더를 드래그해서 불러오세요</div>
+            }
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            {progress && (
+              <span style={{ fontSize:12, color: loading ? "var(--color-text-warning)" : "var(--color-text-success)" }}>
+                {progress}
+              </span>
+            )}
+            <button onClick={() => setShowPricing(p => !p)} style={{ fontSize:12, padding:"7px 12px" }}>
+              <i className="ti ti-currency-won" style={{ marginRight:4 }}></i>단가 설정
+            </button>
+            {cases.length > 0 && (
+              <button
+                onClick={() => { setCases([]); setFolderName(""); setProgress(""); }}
+                style={{ fontSize:12, padding:"7px 12px", color:"var(--color-text-danger)", border:"0.5px solid var(--color-border-danger)" }}
+              >
+                <i className="ti ti-trash" style={{ marginRight:4 }}></i>초기화
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding:"16px 20px" }}>
+
+        {/* ── Pricing panel ── */}
+        {showPricing && (
+          <div style={{
+            background:"var(--color-background-primary)",
+            borderRadius:"var(--border-radius-lg)",
+            border:"0.5px solid var(--color-border-tertiary)",
+            padding:"14px 16px", marginBottom:14
+          }}>
+            <div style={{ fontSize:13, fontWeight:500, marginBottom:10, color:"var(--color-text-primary)" }}>타입별 단가 (원/개)</div>
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+              {Object.entries(LABELS).map(([k, l]) => (
+                <div key={k}>
+                  <label style={{ fontSize:11, color:TAG_COLOR[k], fontWeight:500, display:"block", marginBottom:3 }}>{l}</label>
+                  <input
+                    type="number" value={prices[k]} placeholder="0"
+                    onChange={e => setPrices(p => ({ ...p, [k]: e.target.value }))}
+                    style={{ width:"100%" }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── Drop zone ── */}
+        <div
+          onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
+          style={{
+            borderRadius:"var(--border-radius-lg)",
+            border: dragOver ? "2px dashed var(--color-border-info)" : "1.5px dashed var(--color-border-secondary)",
+            background: dragOver ? "var(--color-background-info)" : "var(--color-background-primary)",
+            padding: cases.length > 0 ? "12px 20px" : "40px 20px",
+            textAlign:"center", marginBottom:14, transition:"all 0.15s"
+          }}
+        >
+          {loading ? (
+            <div style={{ color:"var(--color-text-secondary)", fontSize:14 }}>
+              <i className="ti ti-loader-2" style={{ fontSize:28, display:"block", margin:"0 auto 8px" }}></i>
+              {progress}
+            </div>
+          ) : cases.length > 0 ? (
+            <div style={{ fontSize:12, color:"var(--color-text-secondary)" }}>
+              <i className="ti ti-folder-plus" style={{ marginRight:6, fontSize:14 }}></i>
+              추가 폴더를 여기에 드래그하면 누적됩니다
+            </div>
+          ) : (
+            <>
+              <i className="ti ti-folder-open" style={{ fontSize:48, color:"var(--color-text-secondary)", opacity:0.4, display:"block", margin:"0 auto 12px" }}></i>
+              <div style={{ fontSize:15, fontWeight:500, color:"var(--color-text-primary)", marginBottom:6 }}>
+                Google Drive 동기화 폴더를 여기에 드래그하세요
+              </div>
+              <div style={{ fontSize:12, color:"var(--color-text-secondary)", lineHeight:1.8 }}>
+                날짜별 폴더 또는 최상위 공유폴더를 드래그하면 자동 분석됩니다<br/>
+                <span style={{ fontSize:11, opacity:0.7 }}>Redo 폴더는 자동 제외 · 여러 폴더 누적 가능</span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {cases.length > 0 && (
+          <>
+            {/* ── Summary cards ── */}
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(110px,1fr))", gap:10, marginBottom:14 }}>
+              {[
+                { label:"케이스",  val: filtered.length,  color:"var(--color-text-primary)" },
+                { label:"총 치아",  val: totals.total,     color:"var(--color-text-primary)" },
+              ].map(({ label, val, color }) => (
+                <div key={label} style={{ background:"var(--color-background-primary)", borderRadius:"var(--border-radius-lg)", border:"0.5px solid var(--color-border-tertiary)", padding:"12px 14px" }}>
+                  <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:4 }}>{label}</div>
+                  <div style={{ fontSize:22, fontWeight:500, color }}>{val}</div>
+                </div>
+              ))}
+              {Object.entries(LABELS).map(([k, l]) => totals[k] > 0 && (
+                <div key={k} style={{ background:"var(--color-background-primary)", borderRadius:"var(--border-radius-lg)", border:"0.5px solid var(--color-border-tertiary)", padding:"12px 14px" }}>
+                  <div style={{ fontSize:11, color:TAG_COLOR[k], marginBottom:4 }}>{l}</div>
+                  <div style={{ fontSize:22, fontWeight:500, color:TAG_COLOR[k] }}>{totals[k]}</div>
+                </div>
+              ))}
+              {totalAmt > 0 && (
+                <div style={{ background:"var(--color-background-primary)", borderRadius:"var(--border-radius-lg)", border:"0.5px solid var(--color-border-tertiary)", padding:"12px 14px" }}>
+                  <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:4 }}>예상 금액</div>
+                  <div style={{ fontSize:17, fontWeight:500, color:"var(--color-text-primary)" }}>{totalAmt.toLocaleString()}원</div>
+                </div>
+              )}
+            </div>
+
+            {/* ── Filter bar ── */}
+            <div style={{
+              background:"var(--color-background-primary)",
+              borderRadius:"var(--border-radius-lg)",
+              border:"0.5px solid var(--color-border-tertiary)",
+              padding:"10px 14px", marginBottom:14,
+              display:"flex", gap:10, flexWrap:"wrap", alignItems:"center"
+            }}>
+              <div style={{ position:"relative", flex:"1", minWidth:150 }}>
+                <i className="ti ti-search" style={{ position:"absolute", left:10, top:"50%", transform:"translateY(-50%)", fontSize:14, color:"var(--color-text-secondary)" }}></i>
+                <input
+                  type="text" value={search} placeholder="환자명 / 주문번호..."
+                  onChange={e => setSearch(e.target.value)}
+                  style={{ paddingLeft:30, width:"100%" }}
+                />
+              </div>
+              <div style={{ display:"flex", gap:6, alignItems:"center" }}>
+                <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ fontSize:12, padding:"6px 8px" }}/>
+                <span style={{ color:"var(--color-text-secondary)", fontSize:12 }}>~</span>
+                <input type="date" value={dateTo}   onChange={e => setDateTo(e.target.value)}   style={{ fontSize:12, padding:"6px 8px" }}/>
+              </div>
+              {(dateFrom || dateTo || search) && (
+                <button onClick={() => { setSearch(""); setDateFrom(""); setDateTo(""); }} style={{ fontSize:12, padding:"5px 10px" }}>
+                  <i className="ti ti-x" style={{ marginRight:3 }}></i>초기화
+                </button>
+              )}
+              <button
+                onClick={exportCSV}
+                style={{ fontSize:12, padding:"5px 12px", background:"var(--color-background-success)", color:"var(--color-text-success)", border:"0.5px solid var(--color-border-success)" }}
+              >
+                <i className="ti ti-download" style={{ marginRight:3 }}></i>CSV
+              </button>
+            </div>
+
+            {/* ── Table ── */}
+            <div style={{ background:"var(--color-background-primary)", borderRadius:"var(--border-radius-lg)", border:"0.5px solid var(--color-border-tertiary)", overflow:"hidden" }}>
+              <div style={{ overflowX:"auto" }}>
+                <table>
+                  <thead>
+                    <tr style={{ borderBottom:"0.5px solid var(--color-border-secondary)" }}>
+                      {["날짜","환자명","주문번호","쉐이드","전치부","구치부","브릿지","Abutment","Screw","합계","특이사항"].map(h => (
+                        <th key={h} style={{ textAlign: ["전치부","구치부","브릿지","Abutment","Screw","합계"].includes(h) ? "center" : "left" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.map(c => (
+                      <React.Fragment key={c.folderId}>
+                        <tr
+                          className={expandedRow === c.folderId ? "expanded" : ""}
+                          onClick={() => setExpandedRow(expandedRow === c.folderId ? null : c.folderId)}
+                          style={{ borderBottom:"0.5px solid var(--color-border-tertiary)", cursor:"pointer" }}
+                        >
+                          <td style={{ color:"var(--color-text-secondary)", whiteSpace:"nowrap", fontFamily:"var(--font-mono)", fontSize:11 }}>{c.date}</td>
+                          <td style={{ fontWeight:500, whiteSpace:"nowrap" }}>
+                            {c.patientName}
+                            {c.hasRef && (
+                              <span style={{ marginLeft:5, fontSize:10, background:"#fef3c7", color:"#b45309", padding:"1px 5px", borderRadius:3 }}>REF</span>
+                            )}
+                          </td>
+                          <td style={{ color:"var(--color-text-secondary)", fontFamily:"var(--font-mono)", fontSize:11 }}>{c.orderNumber}</td>
+                          <td>
+                            {c.shade && (
+                              <span style={{ background:"var(--color-background-info)", color:"var(--color-text-info)", padding:"2px 7px", borderRadius:4, fontSize:11 }}>{c.shade}</span>
+                            )}
+                          </td>
+                          {["anterior","posterior","bridge","abutment","screw"].map(k => (
+                            <td key={k} style={{ textAlign:"center" }}><Chip label={k} val={c[k]} small/></td>
+                          ))}
+                          <td style={{ textAlign:"center", fontWeight:500, fontSize:13 }}>{c.total || "—"}</td>
+                          <td>
+                            <div style={{ display:"flex", flexWrap:"wrap", gap:3 }}>
+                              {c.specialTags.slice(0, 3).map(t => (
+                                <span key={t} style={{ background:"var(--color-background-secondary)", color:"var(--color-text-secondary)", padding:"1px 5px", borderRadius:3, fontSize:10, border:"0.5px solid var(--color-border-tertiary)" }}>{t}</span>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+
+                        {expandedRow === c.folderId && (
+                          <tr>
+                            <td colSpan={11} style={{ padding:"10px 14px", background:"var(--color-background-info)", borderBottom:"0.5px solid var(--color-border-secondary)" }}>
+                              <div style={{ fontSize:11, color:"var(--color-text-secondary)", marginBottom:6, fontFamily:"var(--font-mono)" }}>{c.folderName}</div>
+                              <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                                {(c.toothNums || []).sort((a, b) => a.n - b.n).map(({ n, type }, i) => (
+                                  <span key={i} style={{ background:TAG_BG[type], color:TAG_COLOR[type], padding:"2px 8px", borderRadius:4, fontSize:12, fontWeight:500 }}>
+                                    {n} <span style={{ fontSize:10, opacity:0.8 }}>{LABELS[type]}</span>
+                                  </span>
+                                ))}
+                                {(!c.toothNums || c.toothNums.length === 0) && (
+                                  <span style={{ color:"var(--color-text-secondary)", fontSize:12 }}>정산 항목 없음</span>
+                                )}
+                              </div>
+                              {Object.keys(prices).some(k => prices[k] > 0) && (
+                                <div style={{ marginTop:6, fontSize:12, color:"var(--color-text-primary)" }}>
+                                  예상: {Object.keys(prices).reduce((s, k) => s + (Number(prices[k]) || 0) * (c[k] || 0), 0).toLocaleString()}원
+                                </div>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    ))}
+
+                    {/* Totals row */}
+                    <tr style={{ borderTop:"0.5px solid var(--color-border-secondary)", background:"var(--color-background-secondary)" }}>
+                      <td colSpan={4} style={{ fontWeight:500, color:"var(--color-text-primary)" }}>
+                        합계 ({filtered.length}케이스)
+                      </td>
+                      {["anterior","posterior","bridge","abutment","screw"].map(k => (
+                        <td key={k} style={{ textAlign:"center", fontWeight:500 }}><Chip label={k} val={totals[k]}/></td>
+                      ))}
+                      <td style={{ textAlign:"center", fontWeight:500, fontSize:14 }}>{totals.total}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
